@@ -24,17 +24,24 @@ const (
 	publicLowStockLimit  = 5
 )
 
+// PublicSKUView 公共 SKU 响应结构，在原始 SKU 基础上附加促销价
+type PublicSKUView struct {
+	models.ProductSKU
+	PromotionPriceAmount *models.Money `json:"promotion_price_amount,omitempty"`
+}
+
 // PublicProductView 公共商品响应结构
 type PublicProductView struct {
 	models.Product
-	PromotionID          *uint         `json:"promotion_id,omitempty"`
-	PromotionName        string        `json:"promotion_name,omitempty"`
-	PromotionType        string        `json:"promotion_type,omitempty"`
-	PromotionPriceAmount *models.Money `json:"promotion_price_amount,omitempty"`
-	ManualStockAvailable int           `json:"manual_stock_available"`
-	AutoStockAvailable   int64         `json:"auto_stock_available"`
-	StockStatus          string        `json:"stock_status"`
-	IsSoldOut            bool          `json:"is_sold_out"`
+	PromotionID          *uint            `json:"promotion_id,omitempty"`
+	PromotionName        string           `json:"promotion_name,omitempty"`
+	PromotionType        string           `json:"promotion_type,omitempty"`
+	PromotionPriceAmount *models.Money    `json:"promotion_price_amount,omitempty"`
+	PublicSKUs           *[]PublicSKUView `json:"skus,omitempty"`
+	ManualStockAvailable int              `json:"manual_stock_available"`
+	AutoStockAvailable   int64            `json:"auto_stock_available"`
+	StockStatus          string           `json:"stock_status"`
+	IsSoldOut            bool             `json:"is_sold_out"`
 }
 
 // GetConfig 获取全局配置
@@ -201,31 +208,48 @@ func (h *Handler) decoratePublicProduct(product *models.Product, promotionServic
 	displayPrice := resolvePublicDisplayPrice(product)
 	item.Product.PriceAmount = displayPrice
 	h.decorateProductStock(product, &item)
-	if promotionService == nil {
-		return item, nil
-	}
 
-	priceCarrier := *product
-	priceCarrier.PriceAmount = displayPrice
-	promotion, discountedPrice, err := promotionService.ApplyPromotion(&priceCarrier, 1)
-	if err != nil {
-		if errors.Is(err, service.ErrPromotionInvalid) {
-			return item, nil
+	// 构建 PublicSKUs 并为每个 active SKU 计算促销价
+	// 使用 item.Product.SKUs（decorateProductStock 可能已修改库存字段）
+	skuViews := make([]PublicSKUView, 0, len(item.Product.SKUs))
+	var bestPromotion *models.Promotion
+	var lowestPromotionPrice *models.Money
+
+	for _, sku := range item.Product.SKUs {
+		sv := PublicSKUView{ProductSKU: sku}
+		if promotionService != nil && sku.IsActive {
+			priceCarrier := *product
+			priceCarrier.PriceAmount = sku.PriceAmount
+			promotion, discountedPrice, err := promotionService.ApplyPromotion(&priceCarrier, 1)
+			if err != nil && !errors.Is(err, service.ErrPromotionInvalid) {
+				return PublicProductView{}, err
+			}
+			if promotion != nil && discountedPrice.Decimal.LessThan(sku.PriceAmount.Decimal) {
+				sv.PromotionPriceAmount = &discountedPrice
+				if bestPromotion == nil {
+					bestPromotion = promotion
+				}
+				if lowestPromotionPrice == nil || discountedPrice.Decimal.LessThan(lowestPromotionPrice.Decimal) {
+					cp := discountedPrice
+					lowestPromotionPrice = &cp
+				}
+			}
 		}
-		return PublicProductView{}, err
-	}
-	if promotion == nil {
-		return item, nil
-	}
-	if !discountedPrice.Decimal.LessThan(displayPrice.Decimal) {
-		return item, nil
+		skuViews = append(skuViews, sv)
 	}
 
-	promotionID := promotion.ID
-	item.PromotionID = &promotionID
-	item.PromotionName = strings.TrimSpace(promotion.Name)
-	item.PromotionType = strings.TrimSpace(promotion.Type)
-	item.PromotionPriceAmount = &discountedPrice
+	item.PublicSKUs = &skuViews
+	// 隐藏嵌入 Product 中的原始 SKUs，由 PublicSKUs 代替输出
+	item.Product.SKUs = nil
+
+	// 产品级促销信息：取最低 SKU 促销价，用于列表页展示
+	if bestPromotion != nil && lowestPromotionPrice != nil {
+		promotionID := bestPromotion.ID
+		item.PromotionID = &promotionID
+		item.PromotionName = strings.TrimSpace(bestPromotion.Name)
+		item.PromotionType = strings.TrimSpace(bestPromotion.Type)
+		item.PromotionPriceAmount = lowestPromotionPrice
+	}
 
 	return item, nil
 }
