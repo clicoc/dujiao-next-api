@@ -382,6 +382,7 @@ func (s *FulfillmentService) NotifyBotOrderFulfilled(userID, orderID uint) {
 	}
 
 	if err := s.queueClient.EnqueueBotNotify(queue.BotNotifyPayload{
+		EventType:      queue.BotNotifyEventOrderFulfilled,
 		OrderID:        orderID,
 		TelegramUserID: strings.TrimSpace(identity.ProviderUserID),
 	}); err != nil {

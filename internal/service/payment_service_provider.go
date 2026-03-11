@@ -25,9 +25,12 @@ func (s *PaymentService) applyProviderPayment(input CreatePaymentInput, order *m
 	channelType := strings.ToLower(strings.TrimSpace(channel.ChannelType))
 	gatewayCtx, cancel := detachOutboundRequestContext(input.Context)
 	defer cancel()
+	payment.GatewayOrderNo = resolveGatewayOrderNo(channel, payment)
+	providerOrderNo := resolveProviderOrderNo(order.OrderNo, payment)
 	log := paymentLogger(
 		"order_id", order.ID,
 		"order_no", order.OrderNo,
+		"gateway_order_no", payment.GatewayOrderNo,
 		"payment_id", payment.ID,
 		"channel_id", channel.ID,
 		"provider_type", providerType,
@@ -58,7 +61,7 @@ func (s *PaymentService) applyProviderPayment(input CreatePaymentInput, order *m
 		subject := buildOrderSubject(order)
 		param := strconv.FormatUint(uint64(payment.ID), 10)
 		result, err := epay.CreatePayment(gatewayCtx, cfg, epay.CreateInput{
-			OrderNo:     order.OrderNo,
+			OrderNo:     providerOrderNo,
 			PaymentID:   payment.ID,
 			Amount:      payment.Amount.String(),
 			Subject:     subject,
@@ -116,7 +119,7 @@ func (s *PaymentService) applyProviderPayment(input CreatePaymentInput, order *m
 		returnURL = appendURLQuery(returnURL, buildOrderReturnQuery(order, "epusdt_return", ""))
 		subject := buildOrderSubject(order)
 		result, err := epusdt.CreatePayment(gatewayCtx, cfg, epusdt.CreateInput{
-			OrderNo:   order.OrderNo,
+			OrderNo:   providerOrderNo,
 			PaymentID: payment.ID,
 			Amount:    payment.Amount.String(),
 			Name:      subject,
@@ -167,7 +170,7 @@ func (s *PaymentService) applyProviderPayment(input CreatePaymentInput, order *m
 			redirectURL = appendURLQuery(redirectURL, buildOrderReturnQuery(order, "tokenpay_return", ""))
 		}
 		createResult, err := tokenpay.CreatePayment(gatewayCtx, cfg, tokenpay.CreateInput{
-			OutOrderID:      strings.TrimSpace(order.OrderNo),
+			OutOrderID:      providerOrderNo,
 			OrderUserKey:    resolveTokenPayOrderUserKey(order),
 			ActualAmount:    payment.Amount.String(),
 			Currency:        strings.TrimSpace(cfg.Currency),

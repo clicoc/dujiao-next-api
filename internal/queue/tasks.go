@@ -188,9 +188,20 @@ func NewDownstreamCallbackTask(payload DownstreamCallbackPayload) (*asynq.Task, 
 
 // BotNotifyPayload Bot 交付通知任务载荷
 type BotNotifyPayload struct {
+	EventType      string `json:"event_type,omitempty"`
 	OrderID        uint   `json:"order_id"`
 	TelegramUserID string `json:"telegram_user_id"`
+	RechargeNo     string `json:"recharge_no,omitempty"`
+	Amount         string `json:"amount,omitempty"`
+	Currency       string `json:"currency,omitempty"`
 }
+
+const (
+	// BotNotifyEventOrderFulfilled 订单交付通知事件。
+	BotNotifyEventOrderFulfilled = "order_fulfilled"
+	// BotNotifyEventWalletRechargeSucceeded 钱包充值成功通知事件。
+	BotNotifyEventWalletRechargeSucceeded = "wallet_recharge_succeeded"
+)
 
 // NewBotNotifyTask 创建 Bot 交付通知任务
 func NewBotNotifyTask(payload BotNotifyPayload) (*asynq.Task, error) {

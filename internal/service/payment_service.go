@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ type PaymentService struct {
 	paymentRepo           repository.PaymentRepository
 	channelRepo           repository.PaymentChannelRepository
 	walletRepo            repository.WalletRepository
+	userOAuthIdentityRepo repository.UserOAuthIdentityRepository
 	queueClient           *queue.Client
 	walletSvc             *WalletService
 	settingService        *SettingService
@@ -48,35 +50,37 @@ func (s *PaymentService) SetDownstreamCallbackService(svc *DownstreamCallbackSer
 
 // PaymentServiceOptions 支付服务构造参数
 type PaymentServiceOptions struct {
-	OrderRepo           repository.OrderRepository
-	ProductRepo         repository.ProductRepository
-	ProductSKURepo      repository.ProductSKURepository
-	PaymentRepo         repository.PaymentRepository
-	ChannelRepo         repository.PaymentChannelRepository
-	WalletRepo          repository.WalletRepository
-	QueueClient         *queue.Client
-	WalletService       *WalletService
-	SettingService      *SettingService
-	ExpireMinutes       int
-	AffiliateService    *AffiliateService
-	NotificationService *NotificationService
+	OrderRepo             repository.OrderRepository
+	ProductRepo           repository.ProductRepository
+	ProductSKURepo        repository.ProductSKURepository
+	PaymentRepo           repository.PaymentRepository
+	ChannelRepo           repository.PaymentChannelRepository
+	WalletRepo            repository.WalletRepository
+	UserOAuthIdentityRepo repository.UserOAuthIdentityRepository
+	QueueClient           *queue.Client
+	WalletService         *WalletService
+	SettingService        *SettingService
+	ExpireMinutes         int
+	AffiliateService      *AffiliateService
+	NotificationService   *NotificationService
 }
 
 // NewPaymentService 创建支付服务
 func NewPaymentService(opts PaymentServiceOptions) *PaymentService {
 	return &PaymentService{
-		orderRepo:       opts.OrderRepo,
-		productRepo:     opts.ProductRepo,
-		productSKURepo:  opts.ProductSKURepo,
-		paymentRepo:     opts.PaymentRepo,
-		channelRepo:     opts.ChannelRepo,
-		walletRepo:      opts.WalletRepo,
-		queueClient:     opts.QueueClient,
-		walletSvc:       opts.WalletService,
-		settingService:  opts.SettingService,
-		expireMinutes:   opts.ExpireMinutes,
-		affiliateSvc:    opts.AffiliateService,
-		notificationSvc: opts.NotificationService,
+		orderRepo:             opts.OrderRepo,
+		productRepo:           opts.ProductRepo,
+		productSKURepo:        opts.ProductSKURepo,
+		paymentRepo:           opts.PaymentRepo,
+		channelRepo:           opts.ChannelRepo,
+		walletRepo:            opts.WalletRepo,
+		userOAuthIdentityRepo: opts.UserOAuthIdentityRepo,
+		queueClient:           opts.QueueClient,
+		walletSvc:             opts.WalletService,
+		settingService:        opts.SettingService,
+		expireMinutes:         opts.ExpireMinutes,
+		affiliateSvc:          opts.AffiliateService,
+		notificationSvc:       opts.NotificationService,
 	}
 }
 
@@ -656,6 +660,53 @@ func (s *PaymentService) GetChannel(id uint) (*models.PaymentChannel, error) {
 
 func generateWalletRechargeNo() string {
 	return generateSerialNo("WR")
+}
+
+func shouldUseGatewayOrderNo(channel *models.PaymentChannel) bool {
+	if channel == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(channel.ProviderType)) {
+	case constants.PaymentProviderEpay, constants.PaymentProviderEpusdt, constants.PaymentProviderTokenpay:
+		return true
+	default:
+		return false
+	}
+}
+
+func buildGatewayOrderNo(payment *models.Payment) string {
+	if payment == nil || payment.ID == 0 {
+		return ""
+	}
+	return fmt.Sprintf("DJP%d", payment.ID)
+}
+
+func resolveGatewayOrderNo(channel *models.PaymentChannel, payment *models.Payment) string {
+	if !shouldUseGatewayOrderNo(channel) {
+		return ""
+	}
+	if gatewayOrderNo := strings.TrimSpace(payment.GatewayOrderNo); gatewayOrderNo != "" {
+		return gatewayOrderNo
+	}
+	return buildGatewayOrderNo(payment)
+}
+
+func resolveProviderOrderNo(businessOrderNo string, payment *models.Payment) string {
+	if gatewayOrderNo := strings.TrimSpace(payment.GatewayOrderNo); gatewayOrderNo != "" {
+		return gatewayOrderNo
+	}
+	return strings.TrimSpace(businessOrderNo)
+}
+
+func matchesBusinessOrderNo(callbackOrderNo string, businessOrderNo string, payment *models.Payment) bool {
+	callbackOrderNo = strings.TrimSpace(callbackOrderNo)
+	if callbackOrderNo == "" {
+		return true
+	}
+	if callbackOrderNo == strings.TrimSpace(businessOrderNo) {
+		return true
+	}
+	return callbackOrderNo == strings.TrimSpace(payment.GatewayOrderNo)
 }
 
 func buildOrderReturnQuery(order *models.Order, marker string, sessionID string) map[string]string {

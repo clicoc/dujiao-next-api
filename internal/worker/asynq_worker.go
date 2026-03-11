@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -443,8 +444,8 @@ func (c *Consumer) handleBotNotify(_ context.Context, task *asynq.Task) error {
 		logger.Warnw("worker_bot_notify_unmarshal_failed", "error", err)
 		return fmt.Errorf("unmarshal bot notify payload: %w", err)
 	}
-	if payload.OrderID == 0 || payload.TelegramUserID == "" {
-		logger.Debugw("worker_bot_notify_skip_invalid", "order_id", payload.OrderID, "telegram_user_id", payload.TelegramUserID)
+	if strings.TrimSpace(payload.TelegramUserID) == "" {
+		logger.Debugw("worker_bot_notify_skip_invalid", "event_type", payload.EventType, "order_id", payload.OrderID, "telegram_user_id", payload.TelegramUserID, "recharge_no", payload.RechargeNo)
 		return nil
 	}
 
@@ -466,16 +467,43 @@ func (c *Consumer) handleBotNotify(_ context.Context, task *asynq.Task) error {
 		return fmt.Errorf("decrypt channel secret: %w", err)
 	}
 
-	body, _ := json.Marshal(map[string]interface{}{
-		"order_id":         payload.OrderID,
-		"telegram_user_id": payload.TelegramUserID,
-	})
-
 	timestamp := time.Now().Unix()
 	path := "/internal/order-fulfilled"
+	requestBody := map[string]interface{}{
+		"order_id":         payload.OrderID,
+		"telegram_user_id": payload.TelegramUserID,
+	}
+	switch payload.EventType {
+	case "", queue.BotNotifyEventOrderFulfilled:
+		if payload.OrderID == 0 {
+			logger.Debugw("worker_bot_notify_skip_invalid", "event_type", payload.EventType, "order_id", payload.OrderID, "telegram_user_id", payload.TelegramUserID)
+			return nil
+		}
+	case queue.BotNotifyEventWalletRechargeSucceeded:
+		if strings.TrimSpace(payload.RechargeNo) == "" {
+			logger.Debugw("worker_bot_notify_skip_invalid", "event_type", payload.EventType, "telegram_user_id", payload.TelegramUserID, "recharge_no", payload.RechargeNo)
+			return nil
+		}
+		path = "/internal/wallet-recharge-succeeded"
+		requestBody = map[string]interface{}{
+			"recharge_no":      payload.RechargeNo,
+			"telegram_user_id": payload.TelegramUserID,
+			"amount":           payload.Amount,
+			"currency":         payload.Currency,
+		}
+	default:
+		logger.Debugw("worker_bot_notify_skip_unknown_event", "event_type", payload.EventType)
+		return nil
+	}
+	body, _ := json.Marshal(requestBody)
 	signature := upstream.Sign(plainSecret, "POST", path, timestamp, body)
 
-	req, err := http.NewRequest("POST", channelClient.CallbackURL, bytes.NewReader(body))
+	requestURL, err := buildBotNotifyRequestURL(channelClient.CallbackURL, path)
+	if err != nil {
+		return fmt.Errorf("build bot notify request url: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", requestURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create bot notify request: %w", err)
 	}
@@ -508,6 +536,23 @@ func (c *Consumer) handleBotNotify(_ context.Context, task *asynq.Task) error {
 
 	// 5xx 返回 error 触发 asynq 重试
 	return fmt.Errorf("bot notify unexpected status: %d", resp.StatusCode)
+}
+
+func buildBotNotifyRequestURL(rawURL string, path string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid callback url: %s", rawURL)
+	}
+
+	parsed.Path = path
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+
+	return parsed.String(), nil
 }
 
 func (c *Consumer) handleTelegramBroadcast(ctx context.Context, task *asynq.Task) error {

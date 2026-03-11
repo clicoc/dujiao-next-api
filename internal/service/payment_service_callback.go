@@ -68,9 +68,10 @@ func (s *PaymentService) HandleCallback(input PaymentCallbackInput) (*models.Pay
 		)
 		return nil, ErrPaymentInvalid
 	}
-	if input.OrderNo != "" && input.OrderNo != order.OrderNo {
+	if !matchesBusinessOrderNo(input.OrderNo, order.OrderNo, payment) {
 		log.Warnw("payment_callback_order_no_mismatch",
 			"stored_order_no", order.OrderNo,
+			"stored_gateway_order_no", payment.GatewayOrderNo,
 			"callback_order_no", input.OrderNo,
 		)
 		return nil, ErrPaymentInvalid
@@ -160,9 +161,10 @@ func (s *PaymentService) handleWalletRechargeCallback(payment *models.Payment, s
 		)
 		return nil, ErrPaymentInvalid
 	}
-	if input.OrderNo != "" && input.OrderNo != recharge.RechargeNo {
+	if !matchesBusinessOrderNo(input.OrderNo, recharge.RechargeNo, payment) {
 		log.Warnw("wallet_recharge_callback_order_no_mismatch",
 			"stored_recharge_no", recharge.RechargeNo,
+			"stored_gateway_order_no", payment.GatewayOrderNo,
 			"callback_order_no", input.OrderNo,
 		)
 		return nil, ErrPaymentInvalid
@@ -215,6 +217,7 @@ func (s *PaymentService) handleWalletRechargeCallback(payment *models.Payment, s
 	)
 	if updated.Status == constants.PaymentStatusSuccess {
 		s.enqueueWalletRechargeSuccessAsync(recharge, updated, log)
+		s.enqueueWalletRechargeBotNotifyAsync(recharge, log)
 	}
 	s.enqueueExceptionAlertCheckAsync("wallet_recharge_callback_processed", log)
 	return updated, nil
@@ -630,6 +633,40 @@ func (s *PaymentService) enqueueWalletRechargeSuccessAsync(recharge *models.Wall
 		log.Warnw("notification_enqueue_wallet_recharge_failed",
 			"recharge_id", recharge.ID,
 			"recharge_no", recharge.RechargeNo,
+			"error", err,
+		)
+	}
+}
+
+func (s *PaymentService) enqueueWalletRechargeBotNotifyAsync(recharge *models.WalletRechargeOrder, log *zap.SugaredLogger) {
+	if s.queueClient == nil || recharge == nil || recharge.UserID == 0 || s.userOAuthIdentityRepo == nil {
+		return
+	}
+
+	identity, err := s.userOAuthIdentityRepo.GetByUserProvider(recharge.UserID, constants.UserOAuthProviderTelegram)
+	if err != nil {
+		log.Warnw("wallet_recharge_notify_bot_fetch_identity_failed",
+			"recharge_id", recharge.ID,
+			"user_id", recharge.UserID,
+			"error", err,
+		)
+		return
+	}
+	if identity == nil || strings.TrimSpace(identity.ProviderUserID) == "" {
+		return
+	}
+
+	if err := s.queueClient.EnqueueBotNotify(queue.BotNotifyPayload{
+		EventType:      queue.BotNotifyEventWalletRechargeSucceeded,
+		TelegramUserID: strings.TrimSpace(identity.ProviderUserID),
+		RechargeNo:     strings.TrimSpace(recharge.RechargeNo),
+		Amount:         recharge.Amount.String(),
+		Currency:       strings.ToUpper(strings.TrimSpace(recharge.Currency)),
+	}); err != nil {
+		log.Warnw("wallet_recharge_notify_bot_enqueue_failed",
+			"recharge_id", recharge.ID,
+			"recharge_no", recharge.RechargeNo,
+			"user_id", recharge.UserID,
 			"error", err,
 		)
 	}

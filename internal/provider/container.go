@@ -241,18 +241,19 @@ func (c *Container) initServices() {
 	c.ProductMappingService = service.NewProductMappingService(c.ProductMappingRepo, c.SKUMappingRepo, c.ProductRepo, c.ProductSKURepo, c.SiteConnectionService)
 	c.DownstreamCallbackService = service.NewDownstreamCallbackService(c.DownstreamOrderRefRepo, c.OrderRepo, c.ApiCredentialRepo, c.QueueClient)
 	c.PaymentService = service.NewPaymentService(service.PaymentServiceOptions{
-		OrderRepo:           c.OrderRepo,
-		ProductRepo:         c.ProductRepo,
-		ProductSKURepo:      c.ProductSKURepo,
-		PaymentRepo:         c.PaymentRepo,
-		ChannelRepo:         c.PaymentChannelRepo,
-		WalletRepo:          c.WalletRepo,
-		QueueClient:         c.QueueClient,
-		WalletService:       c.WalletService,
-		SettingService:      c.SettingService,
-		ExpireMinutes:       c.Config.Order.PaymentExpireMinutes,
-		AffiliateService:    c.AffiliateService,
-		NotificationService: c.NotificationService,
+		OrderRepo:             c.OrderRepo,
+		ProductRepo:           c.ProductRepo,
+		ProductSKURepo:        c.ProductSKURepo,
+		PaymentRepo:           c.PaymentRepo,
+		ChannelRepo:           c.PaymentChannelRepo,
+		WalletRepo:            c.WalletRepo,
+		UserOAuthIdentityRepo: c.UserOAuthIdentityRepo,
+		QueueClient:           c.QueueClient,
+		WalletService:         c.WalletService,
+		SettingService:        c.SettingService,
+		ExpireMinutes:         c.Config.Order.PaymentExpireMinutes,
+		AffiliateService:      c.AffiliateService,
+		NotificationService:   c.NotificationService,
 	})
 	c.ProcurementOrderService = service.NewProcurementOrderService(
 		c.ProcurementOrderRepo, c.OrderRepo, c.ProductMappingRepo, c.SKUMappingRepo,

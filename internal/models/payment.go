@@ -20,6 +20,7 @@ type Payment struct {
 	Currency        string         `gorm:"not null" json:"currency"`                                // 币种
 	Status          string         `gorm:"index;not null" json:"status"`                            // 支付状态
 	ProviderRef     string         `gorm:"index" json:"provider_ref"`                               // 第三方流水号
+	GatewayOrderNo  string         `gorm:"index;size:64" json:"gateway_order_no"`                   // 网关侧订单号
 	ProviderPayload JSON           `gorm:"type:json" json:"provider_payload"`                       // 第三方回调数据
 	PayURL          string         `gorm:"type:text" json:"pay_url"`                                // 跳转链接
 	QRCode          string         `gorm:"type:text" json:"qr_code"`                                // 二维码内容/地址
