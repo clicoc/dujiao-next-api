@@ -43,6 +43,8 @@ func NewUploadService(cfg *config.Config) *UploadService {
 
 // SaveFile 保存上传的文件
 func (s *UploadService) SaveFile(file *multipart.FileHeader, scene string) (string, error) {
+	normalizedScene := normalizeUploadScene(scene)
+
 	// 验证文件大小
 	if file.Size > s.cfg.Upload.MaxSize {
 		return "", fmt.Errorf("文件大小超过限制（最大 %d MB）", s.cfg.Upload.MaxSize/1024/1024)
@@ -50,7 +52,7 @@ func (s *UploadService) SaveFile(file *multipart.FileHeader, scene string) (stri
 
 	// 获取文件扩展名
 	ext := strings.ToLower(filepath.Ext(file.Filename))
-	if len(s.cfg.Upload.AllowedExtensions) > 0 {
+	if normalizedScene != "telegram" && len(s.cfg.Upload.AllowedExtensions) > 0 {
 		if ext == "" || !isAllowedExtension(ext, s.cfg.Upload.AllowedExtensions) {
 			return "", fmt.Errorf("文件扩展名不被允许: %s", ext)
 		}
@@ -74,7 +76,7 @@ func (s *UploadService) SaveFile(file *multipart.FileHeader, scene string) (stri
 	}
 
 	contentType := http.DetectContentType(buffer)
-	if len(s.cfg.Upload.AllowedTypes) > 0 {
+	if normalizedScene != "telegram" && len(s.cfg.Upload.AllowedTypes) > 0 {
 		allowed := false
 		for _, t := range s.cfg.Upload.AllowedTypes {
 			if strings.EqualFold(contentType, t) {
@@ -106,9 +108,6 @@ func (s *UploadService) SaveFile(file *multipart.FileHeader, scene string) (stri
 	if _, err := src.Seek(0, 0); err != nil {
 		return "", err
 	}
-
-	normalizedScene := normalizeUploadScene(scene)
-
 	// 生成唯一文件名
 	filename := fmt.Sprintf("%s%s", uuid.New().String(), ext)
 	now := time.Now()

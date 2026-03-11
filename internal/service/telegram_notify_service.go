@@ -6,7 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -72,9 +76,13 @@ func (s *TelegramNotifyService) SendWithBotToken(ctx context.Context, botToken s
 	}
 
 	if strings.TrimSpace(options.AttachmentURL) != "" {
+		attachmentURL := strings.TrimSpace(options.AttachmentURL)
+		if filePath, ok := resolveTelegramAttachmentPath(attachmentURL); ok {
+			return s.sendMultipartDocument(ctx, botToken, filePath, options)
+		}
 		payload := map[string]interface{}{
 			"chat_id":  chatID,
-			"document": strings.TrimSpace(options.AttachmentURL),
+			"document": attachmentURL,
 			"caption":  message,
 		}
 		if parseMode := strings.TrimSpace(options.ParseMode); parseMode != "" {
@@ -94,6 +102,49 @@ func (s *TelegramNotifyService) SendWithBotToken(ctx context.Context, botToken s
 	return s.sendJSONRequest(ctx, botToken, "sendMessage", payload)
 }
 
+func (s *TelegramNotifyService) sendMultipartDocument(ctx context.Context, botToken, filePath string, options TelegramSendOptions) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("%w: open attachment failed: %v", ErrNotificationSendFailed, err)
+	}
+	defer file.Close()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	if err := writer.WriteField("chat_id", strings.TrimSpace(options.ChatID)); err != nil {
+		return err
+	}
+	if caption := strings.TrimSpace(options.Message); caption != "" {
+		if err := writer.WriteField("caption", caption); err != nil {
+			return err
+		}
+	}
+	if parseMode := strings.TrimSpace(options.ParseMode); parseMode != "" {
+		if err := writer.WriteField("parse_mode", parseMode); err != nil {
+			return err
+		}
+	}
+	part, err := writer.CreateFormFile("document", filepath.Base(filePath))
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+
+	requestURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", botToken)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, &body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	return s.doRequest(req)
+}
+
 func (s *TelegramNotifyService) sendJSONRequest(ctx context.Context, botToken, method string, payload map[string]interface{}) error {
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -106,7 +157,10 @@ func (s *TelegramNotifyService) sendJSONRequest(ctx context.Context, botToken, m
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	return s.doRequest(req)
+}
 
+func (s *TelegramNotifyService) doRequest(req *http.Request) error {
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrNotificationSendFailed, err)
@@ -129,6 +183,27 @@ func (s *TelegramNotifyService) sendJSONRequest(ctx context.Context, botToken, m
 		return fmt.Errorf("%w: %s", ErrNotificationSendFailed, strings.TrimSpace(parsed.Description))
 	}
 	return nil
+}
+
+func resolveTelegramAttachmentPath(raw string) (string, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", false
+	}
+	parsed, err := url.Parse(value)
+	if err == nil && parsed != nil && parsed.Scheme != "" {
+		return "", false
+	}
+
+	normalized := strings.TrimPrefix(value, "/")
+	normalized = filepath.Clean(normalized)
+	if normalized == "." || normalized == "" {
+		return "", false
+	}
+	if normalized == "uploads" || strings.HasPrefix(normalized, "uploads"+string(filepath.Separator)) {
+		return normalized, true
+	}
+	return "", false
 }
 
 func (s *TelegramNotifyService) resolveBotToken() (string, error) {
