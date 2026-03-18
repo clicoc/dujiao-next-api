@@ -8,23 +8,31 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+func normalizeBootstrapAdminUsername(username string) string {
+	trimmed := strings.TrimSpace(username)
+	if trimmed == "" {
+		return "admin"
+	}
+	return trimmed
+}
+
 // InitDefaultAdmin 初始化默认管理员账号
 func InitDefaultAdmin(username, password string) error {
+	bootstrapUsername := normalizeBootstrapAdminUsername(username)
+
 	var count int64
 	DB.Model(&Admin{}).Count(&count)
 
-	// 如果已有管理员，确保默认 admin 拥有超级管理员权限
+	// 如果已有管理员，确保 bootstrap 默认管理员拥有超级管理员权限
 	if count > 0 {
-		if err := DB.Model(&Admin{}).Where("username = ?", "admin").Update("is_super", true).Error; err != nil {
+		if err := DB.Model(&Admin{}).Where("username = ?", bootstrapUsername).Update("is_super", true).Error; err != nil {
 			logger.Warnw("ensure_default_admin_super_failed", "error", err)
 		}
 		return nil
 	}
 
 	// 创建默认管理员
-	if username == "" {
-		username = "admin"
-	}
+	username = bootstrapUsername
 	if password == "" {
 		password = "admin123"
 	}
@@ -36,7 +44,7 @@ func InitDefaultAdmin(username, password string) error {
 	admin := Admin{
 		Username:     username,
 		PasswordHash: string(hash),
-		IsSuper:      strings.EqualFold(strings.TrimSpace(username), "admin"),
+		IsSuper:      true,
 	}
 
 	if err := DB.Create(&admin).Error; err != nil {
