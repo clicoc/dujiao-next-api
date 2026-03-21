@@ -61,6 +61,7 @@ func TestCreatePayment(t *testing.T) {
 		MerchantToken: "token-1",
 		ReturnURL:     "https://shop.example.com/pay",
 		CallbackURL:   "https://api.example.com/api/v1/payments/callback",
+		ExchangeRate:  "7",
 		Coin:          "USDT",
 	}
 	result, err := CreatePayment(context.Background(), cfg, CreateInput{
@@ -79,6 +80,9 @@ func TestCreatePayment(t *testing.T) {
 	}
 	if !strings.Contains(receivedBody, "unique_id=DJP1001") {
 		t.Fatalf("request body should contain unique_id, got %s", receivedBody)
+	}
+	if !strings.Contains(receivedBody, "amount=131.60000000") {
+		t.Fatalf("request body should contain converted amount, got %s", receivedBody)
 	}
 	if !strings.Contains(receivedBody, "sign=") {
 		t.Fatalf("request body should contain sign, got %s", receivedBody)
@@ -122,6 +126,16 @@ func TestParseJSONCallbackAndVerify(t *testing.T) {
 	}
 	if err := VerifyCallback(cfg, data); err != nil {
 		t.Fatalf("VerifyCallback failed: %v", err)
+	}
+}
+
+func TestConvertAmountByRate(t *testing.T) {
+	converted, err := ConvertAmountByRate("1.00", "0.15")
+	if err != nil {
+		t.Fatalf("ConvertAmountByRate failed: %v", err)
+	}
+	if converted.StringFixed(8) != "0.15000000" {
+		t.Fatalf("unexpected converted amount: %s", converted.StringFixed(8))
 	}
 }
 

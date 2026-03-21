@@ -22,7 +22,17 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestPaymentCallbackHandlesOkpay(t *testing.T) {
+type okpayCallbackFixture struct {
+	orderRepo   repository.OrderRepository
+	paymentRepo repository.PaymentRepository
+	handler     *Handler
+	order       *models.Order
+	payment     *models.Payment
+}
+
+func newOkpayCallbackFixture(t *testing.T, exchangeRate string) *okpayCallbackFixture {
+	t.Helper()
+
 	gin.SetMode(gin.TestMode)
 
 	dsn := fmt.Sprintf("file:payment_callback_okpay_%d?mode=memory&cache=shared", time.Now().UnixNano())
@@ -83,6 +93,7 @@ func TestPaymentCallbackHandlesOkpay(t *testing.T) {
 			"merchant_token": "token-1",
 			"return_url":     "https://example.com/pay",
 			"callback_url":   "https://api.example.com/api/v1/payments/callback",
+			"exchange_rate":  exchangeRate,
 		},
 		IsActive:  true,
 		SortOrder: 10,
@@ -125,14 +136,24 @@ func TestPaymentCallbackHandlesOkpay(t *testing.T) {
 		ChannelRepo:    channelRepo,
 		ExpireMinutes:  15,
 	})
-	h := &Handler{Container: &provider.Container{
-		OrderRepo:          orderRepo,
-		PaymentRepo:        paymentRepo,
-		PaymentChannelRepo: channelRepo,
-		PaymentService:     paymentService,
-	}}
 
-	bodyWithoutSign := "code=200&data[order_id]=OKPAY-ORDER-1&data[unique_id]=DJP9001&data[pay_user_id]=7238234930&data[amount]=88.00&data[coin]=USDT&data[status]=1&data[type]=deposit&id=shop-1&status=success"
+	return &okpayCallbackFixture{
+		orderRepo:   orderRepo,
+		paymentRepo: paymentRepo,
+		handler: &Handler{Container: &provider.Container{
+			OrderRepo:          orderRepo,
+			PaymentRepo:        paymentRepo,
+			PaymentChannelRepo: channelRepo,
+			PaymentService:     paymentService,
+		}},
+		order:   order,
+		payment: payment,
+	}
+}
+
+func TestPaymentCallbackHandlesOkpay(t *testing.T) {
+	fixture := newOkpayCallbackFixture(t, "7")
+	bodyWithoutSign := "code=200&data[order_id]=OKPAY-ORDER-1&data[unique_id]=DJP9001&data[pay_user_id]=7238234930&data[amount]=616.00000000&data[coin]=USDT&data[status]=1&data[type]=deposit&id=shop-1&status=success"
 	sign := md5HexUpper(bodyWithoutSign + "&token=token-1")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/callback", strings.NewReader(bodyWithoutSign+"&sign="+sign))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -140,7 +161,7 @@ func TestPaymentCallbackHandlesOkpay(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	c.Request = req
 
-	h.PaymentCallback(c)
+	fixture.handler.PaymentCallback(c)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d", w.Code)
@@ -149,19 +170,55 @@ func TestPaymentCallbackHandlesOkpay(t *testing.T) {
 		t.Fatalf("unexpected response body: %s", w.Body.String())
 	}
 
-	updatedPayment, err := paymentRepo.GetByID(payment.ID)
+	updatedPayment, err := fixture.paymentRepo.GetByID(fixture.payment.ID)
 	if err != nil {
 		t.Fatalf("reload payment failed: %v", err)
 	}
 	if updatedPayment == nil || updatedPayment.Status != constants.PaymentStatusSuccess {
 		t.Fatalf("payment status not updated: %+v", updatedPayment)
 	}
-	updatedOrder, err := orderRepo.GetByID(order.ID)
+	updatedOrder, err := fixture.orderRepo.GetByID(fixture.order.ID)
 	if err != nil {
 		t.Fatalf("reload order failed: %v", err)
 	}
 	if updatedOrder == nil || updatedOrder.Status != constants.OrderStatusPaid {
 		t.Fatalf("order status not updated: %+v", updatedOrder)
+	}
+}
+
+func TestPaymentCallbackRejectsOkpayAmountMismatch(t *testing.T) {
+	fixture := newOkpayCallbackFixture(t, "7")
+	bodyWithoutSign := "code=200&data[order_id]=OKPAY-ORDER-1&data[unique_id]=DJP9001&data[pay_user_id]=7238234930&data[amount]=615.00000000&data[coin]=USDT&data[status]=1&data[type]=deposit&id=shop-1&status=success"
+	sign := md5HexUpper(bodyWithoutSign + "&token=token-1")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/callback", strings.NewReader(bodyWithoutSign+"&sign="+sign))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	fixture.handler.PaymentCallback(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	if strings.TrimSpace(w.Body.String()) != constants.OkpayCallbackFail {
+		t.Fatalf("unexpected response body: %s", w.Body.String())
+	}
+
+	updatedPayment, err := fixture.paymentRepo.GetByID(fixture.payment.ID)
+	if err != nil {
+		t.Fatalf("reload payment failed: %v", err)
+	}
+	if updatedPayment == nil || updatedPayment.Status != constants.PaymentStatusPending {
+		t.Fatalf("payment status should stay pending: %+v", updatedPayment)
+	}
+
+	updatedOrder, err := fixture.orderRepo.GetByID(fixture.order.ID)
+	if err != nil {
+		t.Fatalf("reload order failed: %v", err)
+	}
+	if updatedOrder == nil || updatedOrder.Status != constants.OrderStatusPendingPayment {
+		t.Fatalf("order status should stay pending payment: %+v", updatedOrder)
 	}
 }
 

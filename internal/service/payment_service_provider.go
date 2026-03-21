@@ -219,7 +219,12 @@ func (s *PaymentService) applyProviderPayment(input CreatePaymentInput, order *m
 		payment.Status = constants.PaymentStatusPending
 		payment.ProviderRef = pickFirstNonEmpty(strings.TrimSpace(createResult.OrderID), strings.TrimSpace(payment.ProviderRef), order.OrderNo)
 		if createResult.Raw != nil {
-			payment.ProviderPayload = models.JSON(createResult.Raw)
+			providerPayload := models.JSON(createResult.Raw)
+			if convertedAmount, convertErr := okpay.ConvertAmountByRate(payment.Amount.String(), cfg.ExchangeRate); convertErr == nil {
+				providerPayload["converted_amount"] = convertedAmount.StringFixed(8)
+				providerPayload["exchange_rate"] = strings.TrimSpace(cfg.ExchangeRate)
+			}
+			payment.ProviderPayload = providerPayload
 		}
 		payment.UpdatedAt = time.Now()
 		if err := s.paymentRepo.Update(payment); err != nil {

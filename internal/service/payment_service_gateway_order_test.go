@@ -231,11 +231,13 @@ func TestApplyProviderPaymentUsesGatewayOrderNoForOkpay(t *testing.T) {
 	}
 
 	var gotUniqueID string
+	var gotAmount string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatalf("parse form failed: %v", err)
 		}
 		gotUniqueID = strings.TrimSpace(r.PostForm.Get("unique_id"))
+		gotAmount = strings.TrimSpace(r.PostForm.Get("amount"))
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"success","code":200,"data":{"order_id":"OKPAY-ORDER-1001","pay_url":"https://pay.example.com/okpay"}}`))
 	}))
@@ -252,6 +254,7 @@ func TestApplyProviderPaymentUsesGatewayOrderNoForOkpay(t *testing.T) {
 			"merchant_token": "token-1001",
 			"return_url":     "https://example.com/pay",
 			"callback_url":   "https://api.example.com/api/v1/payments/callback",
+			"exchange_rate":  "7",
 		},
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -290,6 +293,9 @@ func TestApplyProviderPaymentUsesGatewayOrderNoForOkpay(t *testing.T) {
 	}
 	if gotUniqueID != payment.GatewayOrderNo {
 		t.Fatalf("okpay unique_id = %s, want %s", gotUniqueID, payment.GatewayOrderNo)
+	}
+	if gotAmount != "616.00000000" {
+		t.Fatalf("okpay amount = %s, want 616.00000000", gotAmount)
 	}
 	if payment.ProviderRef != "OKPAY-ORDER-1001" {
 		t.Fatalf("provider ref = %s, want OKPAY-ORDER-1001", payment.ProviderRef)

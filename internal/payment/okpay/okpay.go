@@ -17,6 +17,7 @@ import (
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/payment/common"
+	"github.com/shopspring/decimal"
 )
 
 const (
@@ -38,6 +39,7 @@ type Config struct {
 	ReturnURL     string `json:"return_url"`
 	CallbackURL   string `json:"callback_url"`
 	DisplayName   string `json:"display_name"`
+	ExchangeRate  string `json:"exchange_rate"`
 	Coin          string `json:"coin"`
 	Status        string `json:"status"`
 }
@@ -90,10 +92,14 @@ func (c *Config) Normalize() {
 	c.ReturnURL = strings.TrimSpace(c.ReturnURL)
 	c.CallbackURL = strings.TrimSpace(c.CallbackURL)
 	c.DisplayName = strings.TrimSpace(c.DisplayName)
+	c.ExchangeRate = strings.TrimSpace(c.ExchangeRate)
 	c.Coin = strings.ToUpper(strings.TrimSpace(c.Coin))
 	c.Status = strings.TrimSpace(c.Status)
 	if c.GatewayURL == "" {
 		c.GatewayURL = defaultGatewayURL
+	}
+	if c.ExchangeRate == "" {
+		c.ExchangeRate = "1"
 	}
 }
 
@@ -115,6 +121,9 @@ func ValidateConfig(cfg *Config) error {
 	}
 	if gatewayURL := strings.TrimSpace(cfg.GatewayURL); gatewayURL == "" {
 		return fmt.Errorf("%w: gateway_url is required", ErrConfigInvalid)
+	}
+	if _, err := ParseExchangeRate(cfg.ExchangeRate); err != nil {
+		return err
 	}
 	if cfg.Coin != "" && !isSupportedCoin(cfg.Coin) {
 		return fmt.Errorf("%w: unsupported coin %s", ErrConfigInvalid, cfg.Coin)
@@ -167,10 +176,14 @@ func CreatePayment(ctx context.Context, cfg *Config, input CreateInput) (*Create
 	if returnURL == "" || callbackURL == "" {
 		return nil, ErrConfigInvalid
 	}
+	convertedAmount, err := ConvertAmountByRate(strings.TrimSpace(input.Amount), cfg.ExchangeRate)
+	if err != nil {
+		return nil, err
+	}
 
 	payload := map[string]string{
 		"unique_id":    strings.TrimSpace(input.UniqueID),
-		"amount":       strings.TrimSpace(input.Amount),
+		"amount":       convertedAmount.StringFixed(8),
 		"return_url":   returnURL,
 		"callback_url": callbackURL,
 		"coin":         coin,
@@ -315,6 +328,33 @@ func VerifyCallback(cfg *Config, data *CallbackData) error {
 		return ErrSignatureInvalid
 	}
 	return nil
+}
+
+func ParseExchangeRate(raw string) (decimal.Decimal, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		trimmed = "1"
+	}
+	rate, err := decimal.NewFromString(trimmed)
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("%w: exchange_rate invalid", ErrConfigInvalid)
+	}
+	if rate.LessThanOrEqual(decimal.Zero) {
+		return decimal.Zero, fmt.Errorf("%w: exchange_rate must be greater than 0", ErrConfigInvalid)
+	}
+	return rate, nil
+}
+
+func ConvertAmountByRate(baseAmount string, exchangeRate string) (decimal.Decimal, error) {
+	amount, err := decimal.NewFromString(strings.TrimSpace(baseAmount))
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("%w: invalid amount", ErrConfigInvalid)
+	}
+	rate, err := ParseExchangeRate(exchangeRate)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	return amount.Mul(rate).Round(8), nil
 }
 
 func ToPaymentStatus(requestStatus string, paymentStatus string) string {

@@ -89,18 +89,26 @@ func (h *Handler) HandleOkpayCallback(c *gin.Context) bool {
 		c.Data(200, "application/json", []byte(constants.OkpayCallbackFail))
 		return true
 	}
-
-	amount := models.Money{}
-	if parsedAmount, parseErr := decimal.NewFromString(strings.TrimSpace(data.Amount)); parseErr == nil {
-		amount = models.NewMoneyFromDecimal(parsedAmount)
+	if err := verifyOkpayCallbackAmount(payment, cfg, data); err != nil {
+		log.Warnw("okpay_callback_amount_invalid", "error", err)
+		h.enqueuePaymentExceptionAlert(c, models.JSON{
+			"alert_type":  "okpay_callback_amount_invalid",
+			"alert_level": "error",
+			"payment_id":  fmt.Sprintf("%d", payment.ID),
+			"message":     strings.TrimSpace(err.Error()),
+			"provider":    constants.PaymentProviderOkpay,
+		})
+		c.Data(200, "application/json", []byte(constants.OkpayCallbackFail))
+		return true
 	}
+
 	callbackInput := service.PaymentCallbackInput{
 		PaymentID:   payment.ID,
 		OrderNo:     strings.TrimSpace(data.UniqueID),
 		ChannelID:   channel.ID,
 		Status:      okpay.ToPaymentStatus(data.RequestStatus, data.PaymentStatus),
 		ProviderRef: strings.TrimSpace(data.OrderID),
-		Amount:      amount,
+		Amount:      models.Money{},
 		PaidAt:      ptrCallbackPaidAt(okpay.ToPaymentStatus(data.RequestStatus, data.PaymentStatus)),
 		Payload:     buildOkpayPayload(data),
 	}
@@ -147,4 +155,26 @@ func ptrCallbackPaidAt(status string) *time.Time {
 	}
 	now := time.Now()
 	return &now
+}
+
+func verifyOkpayCallbackAmount(payment *models.Payment, cfg *okpay.Config, data *okpay.CallbackData) error {
+	if payment == nil || cfg == nil || data == nil {
+		return nil
+	}
+	callbackAmountRaw := strings.TrimSpace(data.Amount)
+	if callbackAmountRaw == "" {
+		return nil
+	}
+	expectedAmount, err := okpay.ConvertAmountByRate(payment.Amount.String(), cfg.ExchangeRate)
+	if err != nil {
+		return err
+	}
+	callbackAmount, err := decimal.NewFromString(callbackAmountRaw)
+	if err != nil {
+		return fmt.Errorf("invalid callback amount: %w", err)
+	}
+	if callbackAmount.Cmp(expectedAmount) != 0 {
+		return fmt.Errorf("callback amount mismatch: got %s want %s", callbackAmount.StringFixed(8), expectedAmount.StringFixed(8))
+	}
+	return nil
 }
