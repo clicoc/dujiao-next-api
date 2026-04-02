@@ -38,11 +38,17 @@ type ProcurementOrderService struct {
 	defaultEmailConfig    config.EmailConfig
 	fulfillSvc            *FulfillmentService
 	downstreamCallbackSvc *DownstreamCallbackService
+	notificationSvc       *NotificationService
 }
 
 // SetDownstreamCallbackService 设置下游回调服务（解决循环依赖）
 func (s *ProcurementOrderService) SetDownstreamCallbackService(svc *DownstreamCallbackService) {
 	s.downstreamCallbackSvc = svc
+}
+
+// SetNotificationService 设置通知服务（解决循环依赖）
+func (s *ProcurementOrderService) SetNotificationService(svc *NotificationService) {
+	s.notificationSvc = svc
 }
 
 // NewProcurementOrderService 创建采购单服务
@@ -306,6 +312,7 @@ func (s *ProcurementOrderService) markProcurementError(procOrder *models.Procure
 }
 
 // rejectProcurement 将采购单标记为 rejected（用于永久性配置错误，不值得重试）
+// 同时回退本地订单状态并通知管理员
 func (s *ProcurementOrderService) rejectProcurement(procOrder *models.ProcurementOrder, errMsg string) {
 	now := time.Now()
 	_ = s.procRepo.UpdateStatus(procOrder.ID, "rejected", map[string]interface{}{
@@ -316,6 +323,49 @@ func (s *ProcurementOrderService) rejectProcurement(procOrder *models.Procuremen
 		"procurement_order_id", procOrder.ID,
 		"error", errMsg,
 	)
+	s.rollbackLocalOrderOnProcurementFailure(procOrder, errMsg)
+}
+
+// rollbackLocalOrderOnProcurementFailure 采购单终态失败时回退本地订单状态并通知管理员
+func (s *ProcurementOrderService) rollbackLocalOrderOnProcurementFailure(procOrder *models.ProcurementOrder, errMsg string) {
+	localOrder, err := s.orderRepo.GetByID(procOrder.LocalOrderID)
+	if err != nil || localOrder == nil {
+		return
+	}
+	if localOrder.Status == constants.OrderStatusFulfilling {
+		now := time.Now()
+		_ = s.orderRepo.UpdateStatus(localOrder.ID, constants.OrderStatusPaid, map[string]interface{}{
+			"updated_at": now,
+		})
+		// 如果是子订单，同步父订单状态
+		if localOrder.ParentID != nil {
+			_, _ = syncParentStatus(s.orderRepo, *localOrder.ParentID, now)
+		}
+		logger.Infow("procurement_failure_order_rolled_back",
+			"procurement_order_id", procOrder.ID,
+			"local_order_id", localOrder.ID,
+			"from_status", constants.OrderStatusFulfilling,
+			"to_status", constants.OrderStatusPaid,
+		)
+	}
+	s.notifyProcurementFailure(procOrder, errMsg)
+}
+
+// notifyProcurementFailure 发送采购失败异常告警
+func (s *ProcurementOrderService) notifyProcurementFailure(procOrder *models.ProcurementOrder, errMsg string) {
+	if s.notificationSvc == nil {
+		return
+	}
+	_ = s.notificationSvc.Enqueue(NotificationEnqueueInput{
+		EventType: constants.NotificationEventExceptionAlert,
+		BizType:   constants.NotificationBizTypeProcurement,
+		BizID:     procOrder.ID,
+		Data: models.JSON{
+			"procurement_order_id": procOrder.ID,
+			"local_order_no":       procOrder.LocalOrderNo,
+			"error":                errMsg,
+		},
+	})
 }
 
 // handleSubmitFailure 处理提交失败
@@ -371,6 +421,10 @@ func (s *ProcurementOrderService) handleSubmitFailure(procOrder *models.Procurem
 		"procurement_order_id", procOrder.ID,
 		"error", errMsg,
 	)
+
+	// 回退本地订单状态并通知管理员
+	s.rollbackLocalOrderOnProcurementFailure(procOrder, errMsg)
+
 	return fmt.Errorf("procurement rejected: %s", errMsg)
 }
 
@@ -465,6 +519,9 @@ func (s *ProcurementOrderService) HandleUpstreamCallback(procurementOrderID uint
 		if err := s.procRepo.UpdateStatus(procOrder.ID, "canceled", updates); err != nil {
 			return fmt.Errorf("update procurement status: %w", err)
 		}
+
+		// 回退本地订单状态并通知管理员
+		s.rollbackLocalOrderOnProcurementFailure(procOrder, "upstream canceled order")
 
 		logger.Infow("procurement_order_canceled_by_upstream",
 			"procurement_order_id", procOrder.ID,
@@ -666,8 +723,20 @@ func (s *ProcurementOrderService) SyncAcceptedOrders() {
 			logger.Infow("procurement_sync_accepted_canceled",
 				"procurement_order_id", procOrder.ID,
 			)
+		default:
+			// 检查是否超时（超过 24 小时仍在 accepted 状态）
+			acceptedDuration := time.Since(procOrder.UpdatedAt)
+			if acceptedDuration > 24*time.Hour {
+				logger.Warnw("procurement_accepted_timeout",
+					"procurement_order_id", procOrder.ID,
+					"upstream_order_id", procOrder.UpstreamOrderID,
+					"accepted_duration", acceptedDuration.String(),
+				)
+				s.notifyProcurementFailure(procOrder, fmt.Sprintf(
+					"procurement order stuck in accepted for %s, upstream status: %s",
+					acceptedDuration.Round(time.Hour), detail.Status))
+			}
 		}
-		// 其他状态（paid/fulfilling 等）不处理，等下次巡检
 	}
 }
 

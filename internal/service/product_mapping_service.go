@@ -119,7 +119,15 @@ func (s *ProductMappingService) ImportUpstreamProduct(connectionID uint, upstrea
 	markupPercent := conn.PriceMarkupPercent
 	roundingMode := conn.PriceRoundingMode
 
-	priceAmount, _ := decimal.NewFromString(upProduct.PriceAmount)
+	priceAmount, priceErr := decimal.NewFromString(upProduct.PriceAmount)
+	if priceErr != nil {
+		logger.Warnw("import_product_price_parse_error",
+			"upstream_product_id", upstreamProductID,
+			"price_amount", upProduct.PriceAmount,
+			"error", priceErr,
+		)
+		priceAmount = decimal.Zero
+	}
 	costPriceAmount := convertCurrency(priceAmount, exchangeRate) // 成本价 = 上游价格 × 汇率（本地币种，不含加价）
 	priceAmount = CalculateLocalPrice(priceAmount, exchangeRate, markupPercent, roundingMode)
 	if priceAmount.LessThanOrEqual(decimal.Zero) && len(upProduct.SKUs) > 0 {
@@ -175,7 +183,15 @@ func (s *ProductMappingService) ImportUpstreamProduct(connectionID uint, upstrea
 		skuRepo := s.productSKURepo.WithTx(tx)
 		localSKUs := make([]models.ProductSKU, 0, len(upProduct.SKUs))
 		for _, upSKU := range upProduct.SKUs {
-			skuPrice, _ := decimal.NewFromString(upSKU.PriceAmount)
+			skuPrice, skuPriceErr := decimal.NewFromString(upSKU.PriceAmount)
+			if skuPriceErr != nil {
+				logger.Warnw("import_sku_price_parse_error",
+					"upstream_sku_id", upSKU.ID,
+					"price_amount", upSKU.PriceAmount,
+					"error", skuPriceErr,
+				)
+				skuPrice = decimal.Zero
+			}
 			localPrice := CalculateLocalPrice(skuPrice, exchangeRate, markupPercent, roundingMode)
 			localSKU := models.ProductSKU{
 				ProductID:       product.ID,
@@ -571,7 +587,7 @@ func (s *ProductMappingService) SyncAllStock() error {
 	}
 
 	var mu sync.Mutex
-	var lastErr error
+	var errs []error
 	var wg sync.WaitGroup
 
 	// 每个连接并发处理
@@ -586,14 +602,14 @@ func (s *ProductMappingService) SyncAllStock() error {
 			defer func() { <-sem }()
 			if err := s.syncConnectionStock(connID, connMappings); err != nil {
 				mu.Lock()
-				lastErr = err
+				errs = append(errs, err)
 				mu.Unlock()
 				logger.Warnw("sync_connection_stock_failed", "connection_id", connID, "error", err)
 			}
 		}(connID, connMappings)
 	}
 	wg.Wait()
-	return lastErr
+	return errors.Join(errs...)
 }
 
 // syncConnectionStock 按连接批量同步：一次 ListProducts 拉取所有商品，内存匹配映射
@@ -676,7 +692,12 @@ func (s *ProductMappingService) syncConnectionStock(connectionID uint, connMappi
 				// 增量模式下未返回说明没有变化，跳过
 				continue
 			}
-			// 全量模式下未找到说明上游已删除/下架，跳过
+			// 全量模式下未找到说明上游已删除/下架
+			logger.Warnw("sync_upstream_product_missing",
+				"connection_id", connectionID,
+				"upstream_product_id", mapping.UpstreamProductID,
+				"local_product_id", mapping.LocalProductID,
+			)
 			continue
 		}
 		s.syncProductFromData(mapping, conn, &upProduct, &now)
@@ -747,7 +768,20 @@ func (s *ProductMappingService) syncProductFromData(mapping *models.ProductMappi
 			continue
 		}
 
-		upPrice, _ := decimal.NewFromString(upSKU.PriceAmount)
+		upPrice, priceErr := decimal.NewFromString(upSKU.PriceAmount)
+		if priceErr != nil {
+			logger.Warnw("sync_sku_price_parse_error",
+				"upstream_sku_id", upSKU.ID,
+				"price_amount", upSKU.PriceAmount,
+				"error", priceErr,
+			)
+			// 仅同步库存状态，跳过价格更新
+			skuMappings[i].UpstreamIsActive = upSKU.IsActive
+			skuMappings[i].StockSyncedAt = now
+			skuMappings[i].UpstreamStock = upSKU.StockQuantity
+			_ = s.skuMappingRepo.Update(&skuMappings[i])
+			continue
+		}
 		skuMappings[i].UpstreamPrice = models.NewMoneyFromDecimal(upPrice.Round(2))
 		skuMappings[i].UpstreamIsActive = upSKU.IsActive
 		skuMappings[i].StockSyncedAt = now
@@ -772,7 +806,15 @@ func (s *ProductMappingService) syncProductFromData(mapping *models.ProductMappi
 		if _, exists := existingByUpstreamID[upSKU.ID]; exists {
 			continue
 		}
-		skuPrice, _ := decimal.NewFromString(upSKU.PriceAmount)
+		skuPrice, priceErr := decimal.NewFromString(upSKU.PriceAmount)
+		if priceErr != nil {
+			logger.Warnw("sync_new_sku_price_parse_error",
+				"upstream_sku_id", upSKU.ID,
+				"price_amount", upSKU.PriceAmount,
+				"error", priceErr,
+			)
+			continue
+		}
 		localPrice := CalculateLocalPrice(skuPrice, conn.ExchangeRate, conn.PriceMarkupPercent, conn.PriceRoundingMode)
 		newLocalSKU := models.ProductSKU{
 			ProductID:       mapping.LocalProductID,
