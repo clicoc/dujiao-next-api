@@ -307,7 +307,11 @@ func (h *Handler) GetPaymentChannels(c *gin.Context) {
 		})
 	}
 
-	respondChannelSuccess(c, gin.H{"items": items})
+	resp := gin.H{"items": items}
+	if h.SettingService != nil && h.SettingService.GetWalletOnlyPayment() {
+		resp["wallet_only_payment"] = true
+	}
+	respondChannelSuccess(c, resp)
 }
 
 // GetLatestPayment GET /api/v1/channel/payments/latest

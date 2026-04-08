@@ -314,6 +314,25 @@ func (s *OrderService) createOrder(input orderCreateParams) (*models.Order, erro
 	if err != nil {
 		return nil, err
 	}
+
+	// 仅允许钱包余额支付时，在创建订单（锁库存）前预校验余额是否充足
+	if s.settingService != nil && s.settingService.GetWalletOnlyPayment() {
+		if input.UserID == 0 {
+			// 游客无钱包，wallet-only 模式下不允许下单
+			return nil, ErrWalletOnlyPaymentRequired
+		}
+		if s.walletService == nil {
+			return nil, ErrWalletOnlyPaymentRequired
+		}
+		account, accErr := s.walletService.GetAccount(input.UserID)
+		if accErr != nil {
+			return nil, ErrWalletOnlyPaymentRequired
+		}
+		if account.Balance.Decimal.LessThan(result.TotalAmount) {
+			return nil, ErrWalletInsufficientBalance
+		}
+	}
+
 	affiliateCode := normalizeAffiliateCode(input.AffiliateCode)
 	affiliateVisitorKey := strings.TrimSpace(input.AffiliateVisitorKey)
 	var affiliateProfileID *uint
